@@ -10,7 +10,10 @@ jobs:
   context:
     runs-on: ubuntu-20.04
     steps:
+    - uses: actions/checkout@v2
     - name: Dump Context
       env:
         GITHUB_CONTEXT: ${{ toJson(github) }}
-      run: echo "${GITHUB_CONTEXT}"
+      run: |
+        echo "${GITHUB_CONTEXT}"
+        git rev-parse HEAD
