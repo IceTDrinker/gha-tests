@@ -17,3 +17,11 @@ jobs:
       run: |
         echo "${GITHUB_CONTEXT}"
         git rev-parse HEAD
+    - name: Test null
+      if: ${{ github.lololololo == null }}
+      run: |
+        echo "that is very null"
+    - name: Test non null
+      if: ${{ github.action != null }}
+      run: |
+        echo "very much non null"
