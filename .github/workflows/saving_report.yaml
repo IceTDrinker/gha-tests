@@ -10,8 +10,9 @@ jobs:
   reporting-test:
     runs-on: ubuntu-20.04
     outputs:
-      echo-report: ${{ steps.report.outputs.echo-report || 'Something went wrong during preflight (${{ env.ACTION_RUN_URL }})' }}
-      printf-report: ${{ steps.report.outputs.printf-report || 'Something went wrong during preflight (${{ env.ACTION_RUN_URL }})' }}
+      echo-report: ${{ steps.report.outputs.echo-report || format('Something went wrong during preflight ({0})', env.ACTION_RUN_URL) }}
+      printf-report: ${{ steps.report.outputs.printf-report || format('Something went wrong during preflight ({0})', env.ACTION_RUN_URL) }}
+      default-value-output: ${{ steps.report.outputs.default-value-output || format('Something went wrong during preflight ({0})', env.ACTION_RUN_URL) }}
     steps:
     - name: Write report with echo
       if: ${{ always() }}
@@ -31,3 +32,4 @@ jobs:
       run: |
         echo "${{ needs.reporting-test.outputs.echo-report }}"
         echo "${{ needs.reporting-test.outputs.printf-report }}"
+        echo "${{ needs.reporting-test.outputs.default-value-output }}"
