@@ -1,0 +1,21 @@
+name: docker stuff
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  context:
+    runs-on: ubuntu-20.04
+    # Run in a clean container
+    container:
+      image: ubuntu:20.04
+    steps:
+      - name: Docker container related setup and git installation
+        run: |
+          TZ=Europe/Paris
+          echo "TZ=${TZ}" >> "$GITHUB_ENV"
+          ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime && echo ${TZ} > /etc/timezone
+          apt update && apt install git -y
+
+      - name: Checkout Code
+        uses: actions/checkout@ec3a7ce113134d7a93b817d10a8272cb61118579
