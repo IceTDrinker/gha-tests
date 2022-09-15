@@ -1,27 +1,25 @@
-name: context
+name: mac stuff
 on:
-  workflow_dispatch:
-  push:
-    tags:
-      - "v*"
   pull_request:
 
 jobs:
-  context:
-    runs-on: ubuntu-20.04
+  context-10:
+    runs-on: macos-10.15
     steps:
-    - uses: actions/checkout@v2
-    - name: Dump Context
-      env:
-        GITHUB_CONTEXT: ${{ toJson(github) }}
-      run: |
-        echo "${GITHUB_CONTEXT}"
-        git rev-parse HEAD
-    - name: Test null
-      if: ${{ github.lololololo == null }}
-      run: |
-        echo "that is very null"
-    - name: Test non null
-      if: ${{ github.action != null }}
-      run: |
-        echo "very much non null"
+      - name: Sysctl
+        run: |
+          sysctl kern.osproductversion
+
+  context-11:
+    runs-on: macos-11
+    steps:
+      - name: Sysctl
+        run: |
+          sysctl kern.osproductversion
+
+  context-12:
+    runs-on: macos-12
+    steps:
+      - name: Sysctl
+        run: |
+          sysctl kern.osproductversion
