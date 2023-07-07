@@ -1,0 +1,25 @@
+name: push dispatch
+on:
+  push:
+    branches:
+      - "master"
+  workflow_dispatch:
+    inputs:
+      some_input:
+        description: "some input"
+        type: boolean
+        default: true
+  pull_request:
+
+jobs:
+    push-dispatch-inputs:
+      runs-on: ubuntu-latest
+      strategy:
+        matrix:
+          command: [some_input]
+      steps:
+        - name: Inputs
+          if: ${{ github.event_name == 'push' || toJson(github.event.inputs[matrix.command]) }}
+          run: |
+            echo '${{ toJson(inputs) }}'
+            echo '${{ matrix.command }}'
