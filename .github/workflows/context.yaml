@@ -25,3 +25,6 @@ jobs:
       if: ${{ github.action != null }}
       run: |
         echo "very much non null"
+    - name: User login
+      run: |
+        echo "${{ github.event.pull_request.user.login }}"
