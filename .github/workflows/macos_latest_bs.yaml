@@ -1,0 +1,13 @@
+name: macos_latest_bs
+on:
+  pull_request:
+
+jobs:
+  context:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: rust detects
+      run: |
+        cd wtf-macos-latest
+        cargo run
