@@ -1,0 +1,238 @@
+# Throwaway probe: does Aikido safe-chain (CI mode) still intercept npm once nvm
+# or actions/setup-node have prepended a node bin directory to PATH?
+#
+# Self-contained: no checkout, no dependency on this repository. Push this file
+# on any branch (the push trigger only fires for changes to this file) or run it
+# manually. Every step prints what it does, what was expected and what was
+# observed. The last step writes a table and plain-language conclusions to the
+# job summary.
+#
+# Only npm is probed. safe-chain shims npx the same way, so npm is representative.
+name: safe_chain_probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: read # only needed by actions/setup-node to read the node-versions manifest
+
+env:
+  SAFE_CHAIN_VERSION: "1.5.6"
+  SAFE_CHAIN_INSTALLER_SHA256: "cba28f8ae8bccc8f1e8bab18982cff8dbe2e812a9f04be756618a6c252482673"
+  NVM_VERSION: "v0.39.3"
+  NVM_INSTALLER_SHA256: "2ed5e94ba12434370f0358800deb69f514e8bce90f13beb0e1b241d42c6abafd"
+  NODE_VERSION: "24.12"
+  # Harmless package that Aikido flags as malware on purpose, to test safe-chain
+  TEST_PACKAGE: "safe-chain-test"
+
+jobs:
+  probe:
+    name: safe_chain_probe/probe
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Step 0: write the probe helper"
+        run: |
+          : > "$RUNNER_TEMP/results.txt"
+          cat > "$RUNNER_TEMP/probe.sh" <<'EOF'
+          # probe <key> "<what this probe does>" <expected: BLOCKED or INSTALLED>
+          #
+          # Runs "npm install $TEST_PACKAGE" in a fresh temp dir with the current PATH
+          # and reports whether safe-chain intercepted it. Never fails the step.
+          probe() {
+            local key="$1" what="$2" expected="$3"
+            local npm_path dir out rc observed match
+
+            npm_path="$(command -v npm || echo 'none')"
+
+            dir="$(mktemp -d)"
+            ( cd "$dir" && npm init -y >/dev/null 2>&1 ) || true
+            rc=0
+            out="$(cd "$dir" && npm install "$TEST_PACKAGE" --no-audit --no-fund 2>&1)" || rc=$?
+
+            if [ "$rc" -eq 0 ] && [ -d "$dir/node_modules/$TEST_PACKAGE" ]; then
+              observed="INSTALLED"
+            elif printf '%s' "$out" | grep -qiE 'aikido|safe[- ]?chain|malware|malicious'; then
+              observed="BLOCKED"
+            else
+              observed="INCONCLUSIVE"
+            fi
+            if [ "$observed" = "$expected" ]; then match="yes"; else match="NO"; fi
+
+            echo ""
+            echo "WHAT THIS PROBE DOES"
+            echo "  $what"
+            echo "EXPECTED (if the PATH-shadowing hypothesis holds)"
+            echo "  $expected"
+            echo "OBSERVED"
+            echo "  npm resolved to: $npm_path"
+            echo "  npm install $TEST_PACKAGE exited $rc, so: $observed"
+            echo "VERDICT"
+            echo "  matches expectation: $match"
+            echo "::group::details: PATH, which -a npm, npm output"
+            echo "PATH:"; printf '%s\n' "$PATH" | tr ':' '\n' | sed 's/^/  /'
+            echo "which -a npm:"; which -a npm 2>/dev/null | sed 's/^/  /' || true
+            echo "npm output:"; printf '%s\n' "$out" | sed 's/^/  /'
+            echo "::endgroup::"
+
+            echo "$key|$what|$npm_path|$observed|$expected|$match" >> "$RUNNER_TEMP/results.txt"
+          }
+          EOF
+
+      - name: "Step 1: control, npm before safe-chain exists (expect INSTALLED)"
+        run: |
+          echo "WHAT THIS STEP DOES"
+          echo "  Installs the test package with no safe-chain present at all, to prove the probe itself works."
+          source "$RUNNER_TEMP/probe.sh"
+          probe control "control: npm with no safe-chain installed at all" INSTALLED
+
+      - name: "Step 2: install safe-chain in CI mode, like make install_aikido_safe_chain_ci"
+        run: |
+          echo "WHAT THIS STEP DOES"
+          echo "  Downloads the pinned installer, checks its sha256, runs it with --ci,"
+          echo "  and records which directory it added to GITHUB_PATH."
+          cp "$GITHUB_PATH" "$RUNNER_TEMP/github_path.before"
+
+          curl -fsSL -o install-safe-chain.sh \
+            "https://github.com/AikidoSec/safe-chain/releases/download/${SAFE_CHAIN_VERSION}/install-safe-chain.sh"
+          echo "${SAFE_CHAIN_INSTALLER_SHA256}  install-safe-chain.sh" | sha256sum -c -
+          sh install-safe-chain.sh --ci
+
+          # Lines present in GITHUB_PATH now but not before the installer ran
+          grep -vxF -f "$RUNNER_TEMP/github_path.before" "$GITHUB_PATH" > "$RUNNER_TEMP/added_paths" || true
+          SHIM_DIR=""
+          while IFS= read -r d; do
+            if [ -e "$d/npm" ]; then SHIM_DIR="$d"; break; fi
+          done < "$RUNNER_TEMP/added_paths"
+          if [ -z "$SHIM_DIR" ]; then
+            SHIM_DIR="$(find "$HOME" -maxdepth 4 -name npm -path '*safe*chain*' -printf '%h\n' 2>/dev/null | head -n1 || true)"
+          fi
+          echo "SAFE_CHAIN_SHIM_DIR=${SHIM_DIR}" >> "$GITHUB_ENV"
+
+          added="$(paste -sd' ' "$RUNNER_TEMP/added_paths")"
+          echo ""
+          echo "OBSERVED"
+          echo "  directories the installer added to GITHUB_PATH: ${added:-none}"
+          echo "  safe-chain shim directory: ${SHIM_DIR:-NOT FOUND}"
+          echo "  note: GITHUB_PATH only takes effect from the next step on"
+          echo "::group::details: GITHUB_PATH file and installed files"
+          cat "$GITHUB_PATH"
+          find "$HOME" -maxdepth 3 -ipath '*safe*chain*' 2>/dev/null | head -n 40 || true
+          echo "::endgroup::"
+
+      - name: "Step 3: stock runner node, one step after the install (expect BLOCKED)"
+        run: |
+          echo "WHAT THIS STEP DOES"
+          echo "  Runs npm from the runner's preinstalled node, with nothing else touching PATH."
+          echo "  This is the ci_lint.yml situation."
+          source "$RUNNER_TEMP/probe.sh"
+          probe stock "npm from the runner's stock node, one step after the install (ci_lint.yml situation)" BLOCKED
+
+      - name: "Step 4: nvm use inside the step, like the Makefile ci recipes (expect INSTALLED, then BLOCKED with the fix)"
+        run: |
+          echo "WHAT THIS STEP DOES"
+          echo "  Installs nvm and node the way the Makefile does, then runs npm after 'nvm use' in the same shell."
+          echo "  This is what every Makefile target ending in _ci does before calling npm."
+          echo "  Then it puts the shim directory back in front of PATH and probes again (Makefile fix candidate)."
+          source "$RUNNER_TEMP/probe.sh"
+
+          export NVM_DIR="$RUNNER_TEMP/nvm"
+          mkdir -p "$NVM_DIR"
+          curl -fsSL -o nvm_install.sh "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh"
+          echo "${NVM_INSTALLER_SHA256}  nvm_install.sh" | sha256sum -c -
+          PROFILE=/dev/null bash nvm_install.sh
+
+          # Exactly the pattern used by the Makefile targets ending in _ci
+          source "$NVM_DIR/nvm.sh" && nvm install "$NODE_VERSION" && nvm use "$NODE_VERSION"
+          probe nvm "npm after 'source nvm.sh, nvm install, nvm use' in the same shell (every Makefile _ci recipe)" INSTALLED
+
+          if [ -n "${SAFE_CHAIN_SHIM_DIR:-}" ]; then
+            export PATH="${SAFE_CHAIN_SHIM_DIR}:${PATH}"
+            probe nvm_fix "same shell, after putting the shim directory back in front of PATH (Makefile fix candidate)" BLOCKED
+          else
+            echo "nvm_fix|shim directory unknown, fix probe skipped|none|SKIPPED|BLOCKED|NO" >> "$RUNNER_TEMP/results.txt"
+          fi
+
+      - name: "Step 5: actions/setup-node, which prepends its node to PATH for all later steps"
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: "Step 6: npm one step after setup-node (expect INSTALLED)"
+        run: |
+          echo "WHAT THIS STEP DOES"
+          echo "  Runs npm in a step after actions/setup-node, which ran later than the safe-chain install."
+          source "$RUNNER_TEMP/probe.sh"
+          probe setup_node "npm one step after actions/setup-node ran later than the install (coprocessor benchmark and release situation)" INSTALLED
+
+      - name: "Step 7: put the shim directory back in front, after setup-node (workflow fix candidate)"
+        run: |
+          echo "WHAT THIS STEP DOES"
+          echo "  Runs the installer again. If it does not re-add its directory to GITHUB_PATH, adds it by hand,"
+          echo "  so the shim is in front of setup-node's node from the next step on."
+          cp "$GITHUB_PATH" "$RUNNER_TEMP/github_path.before7"
+          sh install-safe-chain.sh --ci
+          echo ""
+          echo "OBSERVED"
+          if grep -vxF -f "$RUNNER_TEMP/github_path.before7" "$GITHUB_PATH" > "$RUNNER_TEMP/added_paths7"; then
+            echo "  the installer re-added to GITHUB_PATH: $(paste -sd' ' "$RUNNER_TEMP/added_paths7")"
+          elif [ -n "${SAFE_CHAIN_SHIM_DIR:-}" ]; then
+            echo "$SAFE_CHAIN_SHIM_DIR" >> "$GITHUB_PATH"
+            echo "  the installer added nothing, so $SAFE_CHAIN_SHIM_DIR was appended to GITHUB_PATH by hand"
+          else
+            echo "  the installer added nothing and the shim directory is unknown, nothing could be re-added"
+          fi
+
+      - name: "Step 8: npm one step after the shim was put back in front (expect BLOCKED)"
+        run: |
+          echo "WHAT THIS STEP DOES"
+          echo "  Runs npm one step after the shim directory was re-added to GITHUB_PATH behind setup-node."
+          source "$RUNNER_TEMP/probe.sh"
+          probe setup_node_fix "npm one step after the shim directory was re-added to GITHUB_PATH behind setup-node (workflow fix candidate)" BLOCKED
+
+      - name: "Step 9: summary and conclusions"
+        if: always()
+        run: |
+          observed() { awk -F'|' -v k="$1" '$1==k {print $4}' "$RUNNER_TEMP/results.txt"; }
+          obs() { local v; v="$(observed "$1")"; echo "${v:-NOT RUN}"; }
+          {
+            echo "## safe-chain PATH probe (safe-chain ${SAFE_CHAIN_VERSION}, node ${NODE_VERSION})"
+            echo
+            echo "Shim directory: \`${SAFE_CHAIN_SHIM_DIR:-NOT FOUND}\`"
+            echo
+            echo "| Probe | What was tested | npm resolved to | Observed | Expected | Match |"
+            echo "|---|---|---|---|---|---|"
+            awk -F'|' '{printf "| %s | %s | `%s` | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6}' "$RUNNER_TEMP/results.txt"
+            echo
+            echo "### Conclusions"
+            echo
+            case "$(obs control)" in
+              INSTALLED) ;;
+              *) echo "- WARNING: the control did not install the test package ($(obs control)), so the probe itself is not working and the rows below are not meaningful." ;;
+            esac
+            case "$(obs stock)" in
+              BLOCKED) echo "- With the runner's stock node, safe-chain intercepts npm in the step after the install. The ci_lint.yml path is protected." ;;
+              *) echo "- safe-chain did NOT intercept npm even with the stock node ($(obs stock)). Check the installer output in step 2 before reading anything else." ;;
+            esac
+            case "$(obs nvm)" in
+              INSTALLED) echo "- After 'nvm use' in the same shell, the real npm sits in front of the shim: the Makefile _ci recipes bypass safe-chain." ;;
+              BLOCKED) echo "- After 'nvm use', safe-chain still intercepts npm: the Makefile _ci recipes are protected and the nvm hypothesis is wrong." ;;
+              "NOT RUN") echo "- The nvm probe did not run (an earlier step failed)." ;;
+              *) echo "- The nvm probe was not conclusive ($(obs nvm))." ;;
+            esac
+            case "$(obs nvm_fix)" in
+              BLOCKED) echo "- Putting the shim directory back in front of PATH after 'nvm use' restores protection." ;;
+              "NOT RUN"|SKIPPED) echo "- The nvm fix probe did not run ($(obs nvm_fix))." ;;
+              *) echo "- Re-prepending the shim directory after 'nvm use' did NOT restore protection ($(obs nvm_fix))." ;;
+            esac
+            case "$(obs setup_node)" in
+              INSTALLED) echo "- When actions/setup-node runs after the install, the real npm sits in front of the shim bypassing safe-chain." ;;
+              BLOCKED) echo "- Even with actions/setup-node running after the install, safe-chain still intercepts npm: the setup-node hypothesis is wrong." ;;
+              "NOT RUN") echo "- The setup-node probe did not run (an earlier step failed)." ;;
+              *) echo "- The setup-node probe was not conclusive ($(obs setup_node))." ;;
+            esac
+            case "$(obs setup_node_fix)" in
+              BLOCKED) echo "- Re-adding the shim directory to GITHUB_PATH after setup-node restores protection: installing safe-chain after setup-node is a valid fix." ;;
+              "NOT RUN") echo "- The setup-node fix probe did not run (an earlier step failed)." ;;
+              *) echo "- Re-adding the shim directory after setup-node did NOT restore protection ($(obs setup_node_fix))." ;;
+            esac
+          } | tee -a "$GITHUB_STEP_SUMMARY"
